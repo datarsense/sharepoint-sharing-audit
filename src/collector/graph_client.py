@@ -60,16 +60,29 @@ class GraphClient:
         url = "https://graph.microsoft.com/v1.0/$batch"
         headers = {"Authorization": f"Bearer {self._get_token()}"}
         batch_request_body = {"requests": requests }
+        
         for attempt in range(4):
             try:
                 resp = httpx.post(url, headers=headers, json=batch_request_body, timeout=30)
-                if resp.status_code == 429:
-                    retry_after = int(resp.headers.get("Retry-After", "5"))
+                resp.raise_for_status()
+                resp_data = resp.json()
+                
+                # Requests in a batch are evaluated individually against the applicable throttling limits
+                # If any request exceeds the limits, it fails with a status of 429
+                retry_after = 0
+                for r in resp_data["responses"]:
+                    if r["status"] == 429:
+                        if "Retry-After" in r["headers"]:
+                            retry_after = max(retry_after, int(r["headers"]["Retry-After"]))
+                        else:
+                            retry_after = 5**attempt
+
+                if retry_after > 0:
                     logger.warning(f"Rate limited. Waiting {retry_after}s...")
                     time.sleep(retry_after)
                     continue
-                resp.raise_for_status()
-                return resp.json()
+
+                return resp_data
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 401:
                     self._token = None
