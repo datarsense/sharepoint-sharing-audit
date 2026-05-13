@@ -3,7 +3,6 @@
 import logging
 
 import httpx
-import time
 import uuid
 
 from collector.graph_client import GraphClient
@@ -42,7 +41,30 @@ def _walk_drive_items(
         logger.warning(f"Could not list children of {parent_path}: {e}")
         return 0
 
-    chunked_items = chunks(children, 20)
+    # Process only folders and shared items to improve performance and avoid hitting Microsoft Graph service-specific throttling limits
+    items_to_process = []
+    for item in children:
+        if "shared" in item: 
+            items_to_process.append(item)
+            
+        elif "folder" in item:
+            # Recurse into folder
+            item_path = (f"{parent_path}/{item['name']}" if parent_path else f"/{item['name']}")
+            if item.get("folder") and item["folder"].get("childCount", 0) > 0:
+                count += _walk_drive_items(
+                    graph,
+                    neo4j,
+                    drive_id,
+                    item["id"],
+                    item_path,
+                    site_id,
+                    owner_email,
+                    tenant_domain,
+                    run_id,
+                )
+    
+    # Batch process items to benefit from Microsoft Graph API JSON batching capability and improve performance
+    chunked_items = chunks(items_to_process, 20)
     for chunk in chunked_items:
         count += _batch_process_items_permissions(
             graph,
@@ -63,7 +85,7 @@ def _walk_drive_items(
 def _batch_process_items_permissions(
     graph: GraphClient,
     neo4j: Neo4jClient,
-    chunck: List,
+    chunk: List,
     drive_id: str,
     parent_id: str,
     parent_path: str,
@@ -73,7 +95,7 @@ def _batch_process_items_permissions(
     run_id: str
 ) -> int:
     count = 0
-    result = graph.batch_get_item_permissions(drive_id, chunck)
+    result = graph.batch_get_item_permissions(drive_id, chunk)
     
     for batch_item in result.values():
         item = batch_item["data"]
@@ -180,19 +202,6 @@ def _batch_process_items_permissions(
                 )
                 count += 1
 
-        # Recurse into folders
-        if item.get("folder") and item["folder"].get("childCount", 0) > 0:
-            count += _walk_drive_items(
-                graph,
-                neo4j,
-                drive_id,
-                item["id"],
-                item_path,
-                site_id,
-                owner_email,
-                tenant_domain,
-                run_id,
-            )
 
         graph.throttle()
 
