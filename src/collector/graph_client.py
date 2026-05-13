@@ -75,7 +75,9 @@ class GraphClient:
                         if "Retry-After" in r["headers"]:
                             retry_after = max(retry_after, int(r["headers"]["Retry-After"]))
                         else:
-                            retry_after = 5**attempt
+                            retry_after = max(retry_after, 5**attempt)
+                    elif attempt < 3 and r["status"] >= 500:
+                        retry_after = max(retry_after, 5**attempt)
 
                 if retry_after > 0:
                     logger.warning(f"Rate limited. Waiting {retry_after}s...")
