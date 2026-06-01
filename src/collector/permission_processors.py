@@ -8,6 +8,7 @@ from shared.neo4j_client import Neo4jClient
 from collector.user_cache import UserCache
 from collector.neo4j_user_node import Neo4jUserNode
 from collector.neo4j_group_node import Neo4jGroupNode
+from collector.group_cache import GroupMembershipCache
 from shared.classify import (
     get_risk_level,
     determine_user_source,
@@ -17,7 +18,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Cache to track processed groups (prevent duplicate processing)
-processed_groups = {}
+processed_groups = GroupMembershipCache()
 
 
 def is_valid_uuid(uuid_to_test: str, version: int = 4) -> bool:

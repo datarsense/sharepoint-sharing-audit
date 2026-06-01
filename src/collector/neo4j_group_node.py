@@ -65,8 +65,8 @@ class Neo4jGroupNode:
                    {id, displayName, email, @odata.type}
             graph_client: GraphClient instance for member enumeration.
             user_cache: UserCache for efficient user lookups during enumeration.
-            processed_groups_cache: Dict cache to track enumerated groups.
-                                   Format: {group_id: {has_guests: bool, members: [...]}}
+            processed_groups_cache: GroupMembershipCache instance to track enumerated groups.
+                                   Prevents re-enumeration across multiple permissions.
             group_type: Optional override for group type ("Group" or "siteGroup").
                        If None, inferred from group dict.
             
@@ -201,16 +201,17 @@ class Neo4jGroupNode:
         """
         Recursively enumerate all group members (users and nested groups).
         
-        Populates self._members list with all members found, including those from
-        nested groups. Each member includes id, email, displayName, userType, identities,
-        and source classification.
+        Public entry point that delegates to _walk_group_members() for the actual
+        enumeration logic. Populates self._members list with all members found,
+        including those from nested groups. Each member includes id, email, displayName,
+        userType, identities, and source classification.
         
         Also creates Neo4j relationships:
         - (Group)-[CONTAINS]->(User) for direct member users
         - (Group)-[CONTAINS]->(Group) for nested groups
         - User nodes with proper classification
         
-        Results are cached in processed_groups_cache to prevent re-enumeration of
+        Results are cached via processed_groups_cache to prevent re-enumeration of
         the same group across multiple permission contexts.
         
         Args:
@@ -226,62 +227,65 @@ class Neo4jGroupNode:
             >>> for member in group_node.members:
             ...     print(member["displayName"], member["source"])
         """
-        # Check cache first
-        if self.group_id in self.processed_groups_cache:
-            cache_entry = self.processed_groups_cache[self.group_id]
+        return self._walk_group_members(neo4j, run_id)
+    
+    def _walk_group_members(
+        self,
+        neo4j: Neo4jClient,
+        run_id: str,
+        visited_groups: Optional[set] = None,
+        depth: int = 0,
+        max_depth: int = 10,
+    ) -> bool:
+        """
+        Recursively enumerate all members of this group, handling nested groups and caching.
+        
+        Traverses the group membership hierarchy to find all individual users
+        (including guests) at any nesting level. Uses user cache to determine
+        user source based on Graph API userType field. Handles circular group
+        references and enforces a maximum recursion depth.
+        
+        Results are cached in processed_groups_cache to prevent re-enumeration of
+        the same group across multiple permission contexts.
+        
+        Args:
+            neo4j: Neo4jClient for database operations.
+            run_id: Audit run ID.
+            visited_groups: Set of group IDs already processed (prevent circular refs).
+            depth: Current recursion depth.
+            max_depth: Maximum recursion depth to prevent infinite loops.
+            
+        Returns:
+            bool: True if this group or any nested groups contain External/Guest members.
+                
+        Example:
+            >>> has_external = group_node._walk_group_members(neo4j, "run-123")
+            >>> print(f"Members: {len(group_node.members)}, has_guests: {has_external}")
+        """
+        # Initialize visited_groups on first call
+        if visited_groups is None:
+            visited_groups = set()
+        
+        # Check if we've already cached this group
+        if self.processed_groups_cache.has(self.group_id):
+            cache_entry = self.processed_groups_cache.get(self.group_id)
             self._has_external_members = cache_entry.get("has_guests", False)
             self._members = cache_entry.get("members", [])
             self._enumeration_complete = True
             logger.info(f"Using cached members for group {self.group_id}")
             return self._has_external_members
         
-        # Perform enumeration
-        logger.debug(f"Enumerating members for group {self.group_id}")
-        self._enumerate_members_recursive(neo4j, run_id, set())
-        
-        # Cache result
-        self.processed_groups_cache[self.group_id] = {
-            "has_guests": self._has_external_members,
-            "members": self._members.copy(),
-        }
-        
-        self._enumeration_complete = True
-        logger.debug(
-            f"Enumerated {len(self._members)} members for group {self.group_id}, "
-            f"has_external={self._has_external_members}"
-        )
-        
-        return self._has_external_members
-    
-    def _enumerate_members_recursive(
-        self,
-        neo4j: Neo4jClient,
-        run_id: str,
-        visited_groups: set,
-        depth: int = 0,
-        max_depth: int = 10,
-    ) -> None:
-        """
-        Recursively enumerate members, handling nested groups.
-        
-        Args:
-            neo4j: Neo4jClient instance.
-            run_id: Audit run ID.
-            visited_groups: Set of already-processed group IDs (prevent cycles).
-            depth: Current recursion depth.
-            max_depth: Maximum recursion depth.
-        """
         # Check circular reference
         if self.group_id in visited_groups:
             logger.debug(f"Group {self.group_id} already processed, skipping (circular ref)")
-            return
+            return False
         
         # Check depth limit
         if depth > max_depth:
             logger.warning(
                 f"Maximum recursion depth ({max_depth}) reached for group {self.group_id}"
             )
-            return
+            return False
         
         visited_groups.add(self.group_id)
         
@@ -302,8 +306,6 @@ class Neo4jGroupNode:
                 
                 # Get full user data from cache
                 user_data = self.user_cache.get(member_id)
-                # if not user_data:
-                #     user_data = member
                 
                 # Check if this is a user or nested group
                 if member.get("@odata.type") != "#microsoft.graph.group":
@@ -339,7 +341,6 @@ class Neo4jGroupNode:
                 
                 else:
                     # This is a nested group
-                    user_data = member
                     logger.debug(
                         f"Found nested group: {member_display_name} "
                         f"in group {self.group_id}"
@@ -347,9 +348,8 @@ class Neo4jGroupNode:
                     
                     try:
                         # Create nested group node and relationship
-                        logger.info(f"PROCESSING NESTED GROUP: {user_data}")
                         nested_group_node = Neo4jGroupNode(
-                            user_data,
+                            member,
                             self.graph_client,
                             self.user_cache,
                             self.processed_groups_cache,
@@ -358,7 +358,7 @@ class Neo4jGroupNode:
                         nested_group_node.merge_as_nested_group_member(neo4j, self.group_id, run_id)
                         
                         # Recursively enumerate nested group members
-                        nested_group_node._enumerate_members_recursive(
+                        nested_has_external = nested_group_node._walk_group_members(
                             neo4j,
                             run_id,
                             visited_groups,
@@ -367,7 +367,7 @@ class Neo4jGroupNode:
                         )
                         
                         # Track if nested group has external members
-                        if nested_group_node._has_external_members:
+                        if nested_has_external:
                             self._has_external_members = True
                         
                         # Add nested members to our member list
@@ -376,11 +376,28 @@ class Neo4jGroupNode:
                     except ValueError as e:
                         logger.warning(f"Invalid group data for nested group: {e}")
                         continue
+            
+            # Cache result
+            self.processed_groups_cache.set(
+                self.group_id,
+                has_guests=self._has_external_members,
+                members=self._members.copy(),
+            )
+            
+            self._enumeration_complete = True
+            logger.debug(
+                f"Enumerated {len(self._members)} members for group {self.group_id}, "
+                f"has_external={self._has_external_members}"
+            )
+            
+            return self._has_external_members
         
         except Exception:
             logger.exception(
                 f"Error enumerating members for group {self.group_id}"
             )
+            return False
+
     
     # Context-specific merge operations
     
@@ -639,127 +656,3 @@ class Neo4jGroupNode:
             f"Neo4jGroupNode(id={self.group_id}, displayName={self.display_name}, "
             f"members={len(self._members)}, type={self._group_type})"
         )
-
-
-    # def _walk_group_members(
-    #     graph: GraphClient,
-    #     user_cache: UserCache,
-    #     neo4j: Neo4jClient,
-    #     group_id: str,
-    #     run_id: str,
-    #     visited_groups: Optional[set] = None,
-    #     depth: int = 0,
-    #     max_depth: int = 10,
-    # ) -> bool:
-    #     """
-    #     Recursively retrieve all members of a group, expanding nested groups.
-        
-    #     Traverses the group membership hierarchy to find all individual users
-    #     (including guests) at any nesting level. Uses user cache to determine
-    #     user source based on Graph API userType field. Handles circular group
-    #     references and enforces a maximum recursion depth.
-        
-    #     Args:
-    #         graph: GraphClient instance.
-    #         user_cache: UserCache for efficient user lookups.
-    #         neo4j: Neo4jClient for database operations.
-    #         group_id: The group ID to retrieve members for.
-    #         run_id: Audit run ID.
-    #         visited_groups: Set of group IDs already processed (for circular refs).
-    #         depth: Current recursion depth.
-    #         max_depth: Maximum recursion depth to prevent infinite loops.
-            
-    #     Returns:
-    #         bool: True if group or nested groups contain any Guest/External users.
-                
-    #     Example:
-    #         >>> cache = UserCache(graph_client)
-    #         >>> has_external = _walk_group_members(graph, cache, neo4j, "group-id", "run-123")
-    #     """
-    #     if visited_groups is None:
-    #         visited_groups = set()
-        
-    #     if group_id in visited_groups:
-    #         logger.debug(f"Group {group_id} already processed, skipping (circular ref)")
-    #         return False
-        
-    #     if depth > max_depth:
-    #         logger.warning(
-    #             f"Maximum recursion depth ({max_depth}) reached for group {group_id}"
-    #         )
-    #         return False
-        
-    #     visited_groups.add(group_id)
-    #     has_external = False
-        
-    #     try:
-    #         logger.debug(f"Retrieving members for group {group_id} (depth {depth})")
-    #         members = graph.get_group_members(group_id)
-            
-    #         # Pre-populate cache with member IDs to minimize API calls
-    #         member_ids = [m.get("id") for m in members if m.get("id")]
-    #         if member_ids:
-    #             user_cache.batch_populate(member_ids)
-            
-    #         for member in members:
-    #             member_id = member.get("id")
-    #             member_display_name = member.get("displayName", "Unknown")
-                
-    #             # Fetch full user data from cache to ensure we have userType and identities
-    #             user_data = user_cache.get(member_id)
-    #             # if not user_data:
-    #             #     user_data = member  # Use directly fetched member data
-                
-    #             # Check if this is a user (not a nested group)
-    #             if member.get("@odata.type") != "#microsoft.graph.group":
-    #                 # This is a user (Member or Guest)
-    #                 try:
-    #                     member_node = Neo4jUserNode(user_data)
-                        
-    #                     if member_node.is_guest:
-    #                         has_external = True
-                        
-    #                     logger.debug(
-    #                         f"Found {member_node.source} member: {member_display_name} "
-    #                         f"(depth {depth})"
-    #                     )
-                        
-    #                     member_node.merge_as_group_member(neo4j, group_id, run_id)
-    #                 except ValueError as e:
-    #                     logger.warning(f"Invalid user data for group member: {e}")
-    #                     continue
-    #             else:
-    #                 # This is a nested group
-    #                 logger.debug(
-    #                     f"Expanding nested group: {member_display_name} "
-    #                     f"at depth {depth}"
-    #                 )
-    #                 try:
-    #                     neo4j.merge_nested_group(group_id, member_id, member_display_name, "Group", run_id)
-
-    #                 except ValueError as e:
-    #                     logger.warning(f"Invalid group data for nested group: {e}")
-    #                     continue
-                    
-    #                 # Recursively process nested group
-    #                 nested_has_external = _walk_group_members(
-    #                     graph,
-    #                     user_cache,
-    #                     neo4j,
-    #                     member_id,
-    #                     run_id,
-    #                     visited_groups,
-    #                     depth + 1,
-    #                     max_depth,
-    #                 )
-    #                 has_external = has_external or nested_has_external
-            
-    #         # Cache result to avoid processing same group multiple times
-    #         processed_groups[group_id] = {"has_guests": has_external}
-    #         return has_external
-     
-    #     except Exception:
-    #         logger.exception(
-    #             f"Error recursively retrieving members for group {group_id}"
-    #         )
-    #         return False
