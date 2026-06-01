@@ -75,7 +75,12 @@ class GroupMembershipCache:
         if group_id in self._cache:
             self._hits += 1
             logger.debug(f"Cache hit for group {group_id}")
-            return self._cache[group_id]
+            # Return a copy to prevent external modifications from affecting cache
+            cached = self._cache[group_id]
+            return {
+                "has_guests": cached["has_guests"],
+                "members": cached["members"].copy(),  # Copy the members list
+            }
         
         self._misses += 1
         logger.debug(f"Cache miss for group {group_id}")
