@@ -272,7 +272,7 @@ class Neo4jGroupNode:
             self._has_external_members = cache_entry.get("has_guests", False)
             self._members = cache_entry.get("members", [])
             self._enumeration_complete = True
-            logger.info(f"Using cached members for group {self.group_id}")
+            logger.debug(f"Using cached members for group {self.group_id}")
             return self._has_external_members
         
         # Check circular reference
@@ -576,46 +576,6 @@ class Neo4jGroupNode:
         )
     
     # Factory methods
-    
-    @classmethod
-    def from_permission(
-        cls,
-        permission: dict,
-        graph_client: GraphClient,
-        user_cache: UserCache,
-        processed_groups_cache: dict,
-    ) -> "Neo4jGroupNode":
-        """
-        Extract group from permission dict and construct Neo4jGroupNode.
-        
-        Handles both grantedToV2.group and grantedToV2.siteGroup permission types.
-        
-        Args:
-            permission: Permission dict from Graph API with grantedToV2 field.
-            graph_client: GraphClient instance.
-            user_cache: UserCache for member enumeration.
-            processed_groups_cache: Processed groups cache.
-            
-        Returns:
-            Neo4jGroupNode instance.
-            
-        Raises:
-            ValueError: If no group found in permission or group ID is invalid.
-            
-        Example:
-            >>> group_node = Neo4jGroupNode.from_permission(
-            ...     permission_dict, graph_client, cache, proc_cache
-            ... )
-        """
-        granted = permission.get("grantedToV2", {})
-        group_dict = granted.get("group") or granted.get("siteGroup")
-        
-        if not group_dict:
-            raise ValueError("No group found in permission")
-        
-        group_type = "siteGroup" if "siteGroup" in granted else "Group"
-        return cls(group_dict, graph_client, user_cache, processed_groups_cache, group_type)
-    
     @classmethod
     def from_list(
         cls,

@@ -146,12 +146,14 @@ def process_group_permission(
     
     try:
         # Create Neo4jGroupNode from permission
-        group_node = Neo4jGroupNode.from_permission(
-            permission,
-            graph,
-            user_cache,
-            processed_groups,
-        )
+        granted = permission.get("grantedToV2", {})
+        group_dict = granted.get("group") or granted.get("siteGroup")
+        group_type = "Group" if "group" in granted else "siteGroup"
+        
+        if not group_dict:
+            raise ValueError("No group found in permission")
+        
+        group_node = Neo4jGroupNode(group_dict, graph, user_cache, processed_groups, group_type)
 
         # Merge as file permission recipient (handles enumeration, risk escalation, Neo4j ops)
         group_node.merge_as_file_permission_recipient(
