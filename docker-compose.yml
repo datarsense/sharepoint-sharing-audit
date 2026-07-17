@@ -79,6 +79,11 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.apache2
+    environment:
+      WEBAPP_FQDN: ${WEBAPP_FQDN}
+      NEO4J_BROWSER_FQDN: ${NEO4J_BROWSER_FQDN}
+      NEO4J_BOLT_FQDN: ${NEO4J_BOLT_FQDN}
+      NEO4J_ADMIN_RESTRICTED_IP: ${NEO4J_ADMIN_RESTRICTED_IP}
     ports:
       - "80:80"
       - "443:443"
