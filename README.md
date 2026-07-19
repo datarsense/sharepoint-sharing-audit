@@ -17,20 +17,26 @@ The goal is to get your tenant to a clean sharing baseline before you turn on AI
 ## Architecture
 
 ```
-┌─────────────┐      Microsoft       ┌─────────┐      ┌──────────┐
-│  Collector   │─────Graph API───────▶│  Neo4j  │◀─────│ Reporter │
-│  (Python)    │   app-only auth      │  (graph │      │ (Python) │
-│              │   OneDrive + SP      │   DB)   │      │          │
-└─────────────┘   permissions         └─────────┘      └────┬─────┘
-                                           ▲                 │
-                                           │          ┌──────┴──────┐
-                                      ┌────┴─────┐   │  PDF + CSV  │
-                                      │  Webapp   │   │   reports   │
-                                      │ FastAPI + │   └─────────────┘
-                                      │  React    │
-                                      └──────────┘
-                                       delegated
-                                       auth (MSAL)
+┌─────────────┐      Microsoft        ┌────────────┐      ┌──────────┐
+│  Collector  │──────Graph API───────▶│  Neo4j     │◀────│ Reporter │
+│  (Python)   │    app-only auth      │  (graph    │      │ (Python) │
+│             │    OneDrive + SP      │   DB)      │      │          │
+└─────────────┘   permissions         └────────────┘      └─────┬────┘
+                                        ▲       ▲               │
+                                        │       │            ┌──┴──────────┐
+                                        │  ┌────┴────────┐   │  PDF + CSV  │
+                                        │  │  Webapp     │   │   reports   │
+                                        │  │  FastAPI +  │   └─────────────┘
+                                        │  │  React      │
+                                        │  └─────────────┘
+                                        │   delegated   ▲
+                                        │   auth (MSAL) │
+                                        │               │               
+                                   ┌────┴───────────────────┐
+                                   │  Apache2 reverse-proxy │
+                                   │        Port 443        │
+                                   │                        │
+                                   └────────────────────────┘
 ```
 
 - **Collector** — Walks OneDrive and SharePoint drives via Microsoft Graph API, collects all explicit (non-inherited) sharing permissions, and stores them as a graph in Neo4j. Tracks who granted each permission via `grantedBy`.
